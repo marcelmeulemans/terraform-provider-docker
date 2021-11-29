@@ -38,15 +38,23 @@ func resourceDockerRegistryImageCreate(ctx context.Context, d *schema.ResourceDa
 
 	pushOpts := createPushImageOptions(name)
 
+	authConfigs := make(map[string]types.AuthConfig, len(providerConfig.AuthConfigs.Configs))
+	for k, v := range providerConfig.AuthConfigs.Configs {
+		authConfigs[k] = v
+	}
+
 	if buildOptions, ok := d.GetOk("build"); ok {
 		buildOptionsMap := buildOptions.([]interface{})[0].(map[string]interface{})
 		err := buildDockerRegistryImage(ctx, client, buildOptionsMap, pushOpts.FqName)
 		if err != nil {
 			return diag.Errorf("Error building docker image: %s", err)
 		}
+		for k, v := range readAuthConfigs(buildOptionsMap["auth_config"].([]interface{})) {
+			authConfigs[k] = v
+		}
 	}
 
-	username, password := getDockerRegistryImageRegistryUserNameAndPassword(pushOpts, providerConfig)
+	username, password := getDockerRegistryImageRegistryUserNameAndPassword(pushOpts, authConfigs)
 	if err := pushDockerRegistryImage(ctx, client, pushOpts, username, password); err != nil {
 		return diag.Errorf("Error pushing docker image: %s", err)
 	}
@@ -65,7 +73,7 @@ func resourceDockerRegistryImageRead(ctx context.Context, d *schema.ResourceData
 	providerConfig := meta.(*ProviderConfig)
 	name := d.Get("name").(string)
 	pushOpts := createPushImageOptions(name)
-	username, password := getDockerRegistryImageRegistryUserNameAndPassword(pushOpts, providerConfig)
+	username, password := getDockerRegistryImageRegistryUserNameAndPassword(pushOpts, providerConfig.AuthConfigs.Configs)
 
 	insecureSkipVerify := d.Get("insecure_skip_verify").(bool)
 	digest, err := getImageDigestWithFallback(pushOpts, username, password, insecureSkipVerify)
@@ -85,7 +93,7 @@ func resourceDockerRegistryImageDelete(ctx context.Context, d *schema.ResourceDa
 	providerConfig := meta.(*ProviderConfig)
 	name := d.Get("name").(string)
 	pushOpts := createPushImageOptions(name)
-	username, password := getDockerRegistryImageRegistryUserNameAndPassword(pushOpts, providerConfig)
+	username, password := getDockerRegistryImageRegistryUserNameAndPassword(pushOpts, providerConfig.AuthConfigs.Configs)
 	digest := d.Get("sha256_digest").(string)
 	err := deleteDockerRegistryImage(pushOpts, digest, username, password, true, false)
 	if err != nil {
@@ -109,6 +117,24 @@ type internalPushImageOptions struct {
 	NormalizedRegistry string
 	Repository         string
 	Tag                string
+}
+
+func readAuthConfigs(options []interface{}) map[string]types.AuthConfig {
+	authConfigs := make(map[string]types.AuthConfig, len(options))
+	for _, v := range options {
+		authOptions := v.(map[string]interface{})
+		auth := types.AuthConfig{
+			Username:      authOptions["user_name"].(string),
+			Password:      authOptions["password"].(string),
+			Auth:          authOptions["auth"].(string),
+			Email:         authOptions["email"].(string),
+			ServerAddress: authOptions["server_address"].(string),
+			IdentityToken: authOptions["identity_token"].(string),
+			RegistryToken: authOptions["registry_token"].(string),
+		}
+		authConfigs[authOptions["host_name"].(string)] = auth
+	}
+	return authConfigs
 }
 
 func createImageBuildOptions(buildOptions map[string]interface{}) types.ImageBuildOptions {
@@ -149,24 +175,6 @@ func createImageBuildOptions(buildOptions map[string]interface{}) types.ImageBui
 			ulimits[i] = &ulimit
 		}
 		return ulimits
-	}
-
-	readAuthConfigs := func(options []interface{}) map[string]types.AuthConfig {
-		authConfigs := make(map[string]types.AuthConfig, len(options))
-		for _, v := range options {
-			authOptions := v.(map[string]interface{})
-			auth := types.AuthConfig{
-				Username:      authOptions["user_name"].(string),
-				Password:      authOptions["password"].(string),
-				Auth:          authOptions["auth"].(string),
-				Email:         authOptions["email"].(string),
-				ServerAddress: authOptions["server_address"].(string),
-				IdentityToken: authOptions["identity_token"].(string),
-				RegistryToken: authOptions["registry_token"].(string),
-			}
-			authConfigs[authOptions["host_name"].(string)] = auth
-		}
-		return authConfigs
 	}
 
 	buildImageOptions := types.ImageBuildOptions{}
@@ -450,11 +458,11 @@ func pushDockerRegistryImage(ctx context.Context, client *client.Client, pushOpt
 
 func getDockerRegistryImageRegistryUserNameAndPassword(
 	pushOpts internalPushImageOptions,
-	providerConfig *ProviderConfig) (string, string) {
+	authConfigs map[string]types.AuthConfig) (string, string) {
 	registry := pushOpts.NormalizedRegistry
 	username := ""
 	password := ""
-	if authConfig, ok := providerConfig.AuthConfigs.Configs[registry]; ok {
+	if authConfig, ok := authConfigs[registry]; ok {
 		username = authConfig.Username
 		password = authConfig.Password
 	}
